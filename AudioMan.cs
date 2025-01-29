@@ -10,8 +10,7 @@ public class AudioMan : MonoBehaviour
     public static AudioMan Instance { get; private set; }
 
     GameObject dummy;   // Our stored dummy instance, for pooling needs
-    readonly Queue<AudioSource> queue = new Queue<AudioSource>();
-    //readonly List<AudioChannel> channels = new List<AudioChannel>();
+    readonly Queue<AudioSource> queue = new Queue<AudioSource>();    
     readonly Dictionary<string, AudioChannel> channels = new Dictionary<string, AudioChannel>();
     const int defaultMaxVoicesPerChannel = 8;
 
