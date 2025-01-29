@@ -11,12 +11,30 @@ public class AudioMan : MonoBehaviour
 
     GameObject dummy;   // Our stored dummy instance, for pooling needs
     readonly Queue<AudioSource> queue = new Queue<AudioSource>();
+    //readonly List<AudioChannel> channels = new List<AudioChannel>();
+    readonly Dictionary<string, AudioChannel> channels = new Dictionary<string, AudioChannel>();
+    const int defaultMaxVoicesPerChannel = 8;
 
     // Store created coroutine yields, to minimise garbage allocation
     readonly Dictionary<float, WaitForSeconds> _wait = new Dictionary<float, WaitForSeconds>(100);
     readonly Dictionary<float, WaitForSecondsRealtime> _waitReal = new Dictionary<float, WaitForSecondsRealtime>(100);
 
-#region Pooling
+    public class AudioChannel
+    {
+        public string name;
+        public int maxEmitters;
+        public int activeEmitters;
+
+        // Constructor
+        public AudioChannel(string name, int maxEmitters, int activeEmitters)
+        {
+            this.name = name;
+            this.maxEmitters = maxEmitters;
+            this.activeEmitters = activeEmitters;
+        }
+    }
+
+    #region Pooling
 
     WaitForSeconds GetWaitForSeconds(float seconds)
     {
@@ -66,48 +84,74 @@ public class AudioMan : MonoBehaviour
         dummy.gameObject.SetActive(true);
         return dummy;
     }
-    // Return a dummy instance to the pool
-    void AddToPool(AudioSource dummy)
-    {
-        dummy.transform.SetParent(transform);
-        dummy.gameObject.SetActive(false);
-        queue.Enqueue(dummy);
-    }
 
-#endregion
+    #endregion
 
+    // Declares singleton instanec and initialise object pool
     void Awake()
     {
-        Instance = this;
+        if (Instance != null)
+            Destroy(gameObject);
+
+        Instance = this;        
         AssemblePool(10);
-        gameObject.transform.name = "AudioMan";
+    }
+
+    // Creates a new channel with specified max simultaneously playing emitters
+    public void SetChannel(string _name, int maxEmitters)
+    {
+        if (channels.ContainsKey(_name))
+        {
+            channels[_name].maxEmitters = maxEmitters;
+            if (channels[_name].activeEmitters > maxEmitters)
+                channels[_name].activeEmitters = maxEmitters;
+        }   
+        else
+        {
+            channels.Add(_name, new AudioChannel(_name, maxEmitters, 0));
+        }
+    }
+
+    // Returns true if specified channel current emitter count is below its max emitter value, creates new channel using default values if channel does not exist
+    bool ChannelIsAvailable(string channel)
+    {
+        if(!channels.ContainsKey(channel))
+        {
+            channels.Add(channel, new AudioChannel(channel, defaultMaxVoicesPerChannel, 0));
+            return true;
+        }
+
+        if (channels[channel].activeEmitters < channels[channel].maxEmitters)
+            return true;
+        else
+            return false;
     }
 
     // Request a non-spatialised sound to be played, takes a clip
-    public void PlaySound2D(AudioClip sound, float volume, float pitch = 1f, float delay = 0f, bool realTimeDelay = false)
+    public void PlaySound2D(AudioClip sound, float volume = 0.5f, float pitch = 1f, float delay = 0f, bool realTimeDelay = false, string channel = null)
     {
+        if(channel != null && !ChannelIsAvailable(channel))
+            return;
+
         AudioSource audioSource = GetFromPool();
         audioSource.volume = volume;
         audioSource.pitch = pitch;
         audioSource.clip = sound;
-
-        StartCoroutine(PlaySound(audioSource, delay, realTimeDelay));
+        StartCoroutine(PlaySound(audioSource, delay, realTimeDelay, channel));
     }
 
     // Request a non-spatialised sound to be played, takes an array and extracts a random clip
-    public void PlaySound2D(AudioClip[] sound, float volume, float pitch = 1f, float delay = 0f, bool realTimeDelay = false)
+    public void PlaySound2D(AudioClip[] sound, float volume = 0.5f, float pitch = 1f, float delay = 0f, bool realTimeDelay = false, string channel = null)
     {
-        AudioSource audioSource = GetFromPool();
-        audioSource.volume = volume;
-        audioSource.pitch = pitch;
-        audioSource.clip = RandomClipFromArray(sound);
-
-        StartCoroutine(PlaySound(audioSource, delay, realTimeDelay));
+        PlaySound2D(GetRandomClipOfArray(sound), volume, pitch, delay, realTimeDelay, channel);
     }
 
     // Request a spatialised sound to be played at position X, takes a clip
-    public void PlaySound3D(Vector3 point, AudioClip sound, float volume, float pitch, float spatialBlend, Vector2 minMaxDistance, float delay = 0f, bool realTimeDelay = false)
+    public void PlaySound3D(Vector3 point, AudioClip sound, float volume, float pitch, float spatialBlend, Vector2 minMaxDistance, float delay = 0f, bool realTimeDelay = false, string channel = null)
     {
+        if (channel != null && !ChannelIsAvailable(channel))
+            return;
+
         AudioSource audioSource = GetFromPool();
         audioSource.transform.position = point;
         audioSource.volume = volume;
@@ -121,22 +165,13 @@ public class AudioMan : MonoBehaviour
     }
 
     // Request a spatialised sound to be played at position X, takes an array and extracts a random clip
-    public void Sound3D(Vector3 point, AudioClip[] sound, float volume, float pitch, float spatialBlend, Vector2 minMaxDistance, float delay = 0f, bool realTimeDelay = false)
+    public void Sound3D(Vector3 point, AudioClip[] sound, float volume, float pitch, float spatialBlend, Vector2 minMaxDistance, float delay = 0f, bool realTimeDelay = false, string channel = null)
     {
-        AudioSource audioSource = GetFromPool();
-        audioSource.transform.position = point;
-        audioSource.volume = volume;
-        audioSource.pitch = pitch;
-        audioSource.clip = RandomClipFromArray(sound);
-        audioSource.spatialBlend = spatialBlend;
-        audioSource.minDistance = minMaxDistance.x;
-        audioSource.maxDistance = minMaxDistance.y;
-
-        StartCoroutine(PlaySound(audioSource, delay, realTimeDelay));
+        PlaySound3D(point, GetRandomClipOfArray(sound), volume, pitch, spatialBlend, minMaxDistance, delay, realTimeDelay, channel);
     }
 
     // Coroutine which resolves the requested audio event
-    IEnumerator PlaySound(AudioSource audioSource, float delay, bool realTimeDelay = false)
+    IEnumerator PlaySound(AudioSource audioSource, float delay, bool realTimeDelay = false, string channel = null)
     {
         if (delay > 0f)
         {
@@ -148,7 +183,15 @@ public class AudioMan : MonoBehaviour
 
         audioSource.gameObject.SetActive(true);
         audioSource.PlayOneShot(audioSource.clip);
-        StartCoroutine(ReturnToPool(audioSource, delay, realTimeDelay));
+
+        // Register the emitter with the channels hashmap
+        if (channel != null)
+        {
+            if (channels.ContainsKey(channel))
+                channels[channel].activeEmitters += 1;
+        }
+
+        StartCoroutine(ReturnToPool(audioSource, delay, realTimeDelay, channel));
     }
 
     // Helper coroutine to fade volume over time
@@ -180,7 +223,7 @@ public class AudioMan : MonoBehaviour
     }
 
     // Returns the used dummy to the pool after concluding the audio clip
-    IEnumerator ReturnToPool(AudioSource audioSource, float delay, bool realTimeDelay = false)
+    IEnumerator ReturnToPool(AudioSource audioSource, float delay, bool realTimeDelay = false, string channel = null)
     {
         delay += audioSource.clip.length * audioSource.pitch + 0.1f;
 
@@ -189,13 +232,38 @@ public class AudioMan : MonoBehaviour
         else
             yield return GetWaitForSecondsRealTime(delay);
 
-        AddToPool(audioSource);
+        // De-register the emitter from the channels hashmap
+        if (channel != null)
+        {
+            if (channels.ContainsKey(channel))
+                channels[channel].activeEmitters -= 1;
+        }
+
+        // Return dummy instance to the pool
+        audioSource.transform.SetParent(transform);
+        audioSource.gameObject.SetActive(false);
+        queue.Enqueue(audioSource);
     }
 
-    AudioClip RandomClipFromArray(AudioClip[] array)
+    AudioClip GetRandomClipOfArray(AudioClip[] array)
     {
         return array[Random.Range(0, array.Length)];
     }
-}
 
+    // For debug purposes, uncomment as needed.
+
+    //void OnGUI()
+    //{     
+    //    int offY = 300;
+    //    int offX = 100;
+    //    int i = 0;
+
+    //    GUI.Label(new Rect(offX, offY + 15 * -1, 400, 100), "CHANNELS:");
+    //    foreach (var value in channels.Values)
+    //    {            
+    //        GUI.Label(new Rect(offX, offY + 15 * i, 400, 100), $"Channel: {value.name} --- Active emitters: " + value.activeEmitters + "/" + value.maxEmitters);                
+    //        i++;
+    //    }
+    //}
+}
 
